@@ -399,7 +399,9 @@ typedef struct ssl_ctx_st * (*lsquic_lookup_cert_f)(
 #define LSQUIC_DF_TIMESTAMPS 1
 
 /* Use Adaptive CC by default */
-#define LSQUIC_DF_CC_ALGO 3
+// #define LSQUIC_DF_CC_ALGO 3
+// Changed the congestion control algorithm from adaptive to Cubic
+#define LSQUIC_DF_CC_ALGO 1
 
 /* Default value of the CC RTT threshold is 1.5 ms */
 #define LSQUIC_DF_CC_RTT_THRESH 1500

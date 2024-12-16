@@ -196,6 +196,7 @@ lsquic_cubic_ack (void *cong_ctl, struct lsquic_packet_out *packet_out,
     }
 
     LOG_CWND(cubic);
+    LSQ_DEBUG("VSQoE: info: cwnd: %lu", cubic->cu_cwnd);
 }
 
 
