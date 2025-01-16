@@ -29,6 +29,10 @@
 #include "lsquic_packet_out.h"
 #include "lsquic_cubic.h"
 
+// VSQoE headers
+// NOTE: Windows compatability is not an objective.
+#include <pthread.h>
+
 #define LSQUIC_LOGGER_MODULE LSQLM_CUBIC
 #define LSQUIC_LOG_CONN_ID lsquic_conn_log_cid(cubic->cu_conn)
 #include "lsquic_logger.h"
@@ -167,6 +171,20 @@ lsquic_cubic_was_quiet (void *cong_ctl, lsquic_time_t now, uint64_t in_flight)
     cubic->cu_epoch_start = 0;
 }
 
+static void *vsqoe_map_update(void *arg) {
+    struct lsquic_cubic *cubic = (struct lsquic_cubic *)arg;
+    unsigned long cwnd = cubic->cu_cwnd;
+    char commandBuf[256];
+    snprintf(commandBuf, sizeof(commandBuf), "sudo bpftool map update name CwndMap "
+             "key hex 00 00 00 00 value hex %02lX %02lX %02lX %02lX",
+             cwnd & 0xFF, (cwnd >> 8) & 0xFF, (cwnd >> 16) & 0xFF, (cwnd >> 24) & 0xFF);
+    if (system(commandBuf) == -1) {
+        LSQ_DEBUG("VSQoE: error: unable to execute shell command to update cwnd value in eBPF map");
+    } else {
+        LSQ_DEBUG("VSQoE: info: updated cwnd value in eBPF map");
+    }
+    pthread_exit(NULL);
+}
 
 static void
 lsquic_cubic_ack (void *cong_ctl, struct lsquic_packet_out *packet_out,
@@ -196,7 +214,16 @@ lsquic_cubic_ack (void *cong_ctl, struct lsquic_packet_out *packet_out,
     }
 
     LOG_CWND(cubic);
-    LSQ_DEBUG("VSQoE: info: cwnd: %lu", cubic->cu_cwnd);
+    // LSQ_DEBUG("VSQoE: info: cwnd: %lu", cubic->cu_cwnd);
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, vsqoe_map_update, (void *)cubic) != 0) {
+        LSQ_DEBUG("VSQoE: error: could not create thread");
+        return;
+    }
+    // Detach the thread as we dont want to wait for the thread to finish execution.
+    if (pthread_detach(thread) != 0) {
+        LSQ_DEBUG("VSQoE: error: could not detach thread");
+    }
 }
 
 
