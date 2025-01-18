@@ -31,7 +31,12 @@
 
 // VSQoE headers
 // NOTE: Windows compatability is not an objective.
-#include <pthread.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+// VSQoE Definitions
+#define SOCKET_PATH "/tmp/cnode.sock"
 
 #define LSQUIC_LOGGER_MODULE LSQLM_CUBIC
 #define LSQUIC_LOG_CONN_ID lsquic_conn_log_cid(cubic->cu_conn)
@@ -171,19 +176,32 @@ lsquic_cubic_was_quiet (void *cong_ctl, lsquic_time_t now, uint64_t in_flight)
     cubic->cu_epoch_start = 0;
 }
 
-static void *vsqoe_map_update(void *arg) {
-    struct lsquic_cubic *cubic = (struct lsquic_cubic *)arg;
-    unsigned long cwnd = cubic->cu_cwnd;
-    char commandBuf[256];
-    snprintf(commandBuf, sizeof(commandBuf), "sudo bpftool map update name CwndMap "
-             "key hex 00 00 00 00 value hex %02lX %02lX %02lX %02lX",
-             cwnd & 0xFF, (cwnd >> 8) & 0xFF, (cwnd >> 16) & 0xFF, (cwnd >> 24) & 0xFF);
-    if (system(commandBuf) == -1) {
-        LSQ_DEBUG("VSQoE: error: unable to execute shell command to update cwnd value in eBPF map");
-    } else {
-        LSQ_DEBUG("VSQoE: info: updated cwnd value in eBPF map");
+static void vsqoe_send_cwnd(struct lsquic_cubic *cubic) {
+    int sockfd;
+    struct sockaddr_un server_addr;
+
+    char send_data[256];
+    sprintf(send_data, "{\"cwnd\": %lu, \"ssthresh\": %lu}", cubic->cu_cwnd, cubic->cu_ssthresh);
+    LSQ_DEBUG("VSQoE: info: cwnd: %lu, ssthresh: %lu", cubic->cu_cwnd, cubic->cu_ssthresh);
+
+    sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        LSQ_DEBUG("VSQoE: error: could not create socket");
+        return;
     }
-    pthread_exit(NULL);
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sun_family = AF_UNIX;
+    strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path)-1);
+
+    if (connect(sockfd, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
+        LSQ_DEBUG("VSQoE: error: could not connect to server");
+        close(sockfd);
+        return;
+    }
+
+    write(sockfd, send_data, strlen(send_data));
+    close(sockfd);
 }
 
 static void
@@ -214,16 +232,7 @@ lsquic_cubic_ack (void *cong_ctl, struct lsquic_packet_out *packet_out,
     }
 
     LOG_CWND(cubic);
-    // LSQ_DEBUG("VSQoE: info: cwnd: %lu", cubic->cu_cwnd);
-    pthread_t thread;
-    if (pthread_create(&thread, NULL, vsqoe_map_update, (void *)cubic) != 0) {
-        LSQ_DEBUG("VSQoE: error: could not create thread");
-        return;
-    }
-    // Detach the thread as we dont want to wait for the thread to finish execution.
-    if (pthread_detach(thread) != 0) {
-        LSQ_DEBUG("VSQoE: error: could not detach thread");
-    }
+    vsqoe_send_cwnd(cubic);
 }
 
 
