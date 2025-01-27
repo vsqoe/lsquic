@@ -31,12 +31,15 @@
 
 // VSQoE headers
 // NOTE: Windows compatability is not an objective.
-#include <sys/socket.h>
-#include <sys/un.h>
+#include <stdatomic.h>
+#include <pthread.h>
 #include <unistd.h>
+#include <stdio.h>
 
-// VSQoE Definitions
-#define SOCKET_PATH "/tmp/cnode.sock"
+// VSQoE definitions
+static atomic_int vsqoe_latest_value;
+static atomic_int vsqoe_value_updated;
+static int vsqoe_worker_thread_initiated = 0;
 
 #define LSQUIC_LOGGER_MODULE LSQLM_CUBIC
 #define LSQUIC_LOG_CONN_ID lsquic_conn_log_cid(cubic->cu_conn)
@@ -176,32 +179,20 @@ lsquic_cubic_was_quiet (void *cong_ctl, lsquic_time_t now, uint64_t in_flight)
     cubic->cu_epoch_start = 0;
 }
 
-static void vsqoe_send_cwnd(struct lsquic_cubic *cubic) {
-    int sockfd;
-    struct sockaddr_un server_addr;
-
-    char send_data[256];
-    sprintf(send_data, "{\"cwnd\": %lu, \"ssthresh\": %lu}", cubic->cu_cwnd, cubic->cu_ssthresh);
-    LSQ_DEBUG("VSQoE: info: cwnd: %lu, ssthresh: %lu", cubic->cu_cwnd, cubic->cu_ssthresh);
-
-    sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        LSQ_DEBUG("VSQoE: error: could not create socket");
-        return;
+void *vsqoe_worker_thread(void *arg) {
+    while (1) {
+        // Checks and resets the 'value_updated' flag in an atomic operation
+        if (atomic_exchange(&vsqoe_value_updated, 0)) {
+            int cwnd = atomic_load(&vsqoe_latest_value);
+            char commandBuf[256];
+            snprintf(commandBuf, sizeof(commandBuf), "sudo bpftool map update name CwndMap "
+                     "key hex 00 00 00 00 value hex %02X %02X %02X %02X",
+                     cwnd & 0xFF, (cwnd >> 8) & 0xFF, (cwnd >> 16) & 0xFF, (cwnd >> 24) & 0xFF);
+            system(commandBuf);
+        }
+        usleep(1000); // Sleep briefly to prevent busy-waiting
     }
-
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sun_family = AF_UNIX;
-    strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path)-1);
-
-    if (connect(sockfd, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
-        LSQ_DEBUG("VSQoE: error: could not connect to server");
-        close(sockfd);
-        return;
-    }
-
-    write(sockfd, send_data, strlen(send_data));
-    close(sockfd);
+    return NULL;
 }
 
 static void
@@ -231,8 +222,20 @@ lsquic_cubic_ack (void *cong_ctl, struct lsquic_packet_out *packet_out,
         LSQ_DEBUG("ACK: cwnd: %lu", cubic->cu_cwnd);
     }
 
+    if (!vsqoe_worker_thread_initiated) {
+        atomic_init(&vsqoe_latest_value, 0);
+        atomic_init(&vsqoe_value_updated, 0);
+
+        pthread_t thread;
+        pthread_create(&thread, NULL, vsqoe_worker_thread, NULL);
+        pthread_detach(thread);
+        vsqoe_worker_thread_initiated = 1;
+    }
+
     LOG_CWND(cubic);
-    vsqoe_send_cwnd(cubic);
+    LSQ_DEBUG("VSQoE: info: cwnd: %lu", cubic->cu_cwnd);
+    atomic_store(&vsqoe_latest_value, cubic->cu_cwnd);
+    atomic_store(&vsqoe_value_updated, 1);
 }
 
 
