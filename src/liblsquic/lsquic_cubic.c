@@ -29,17 +29,10 @@
 #include "lsquic_packet_out.h"
 #include "lsquic_cubic.h"
 
-// VSQoE headers
-// NOTE: Windows compatability is not an objective.
-#include <stdatomic.h>
-#include <pthread.h>
-#include <unistd.h>
-#include <stdio.h>
-
-// VSQoE definitions
-static atomic_int vsqoe_latest_value;
-static atomic_int vsqoe_value_updated;
-static int vsqoe_worker_thread_initiated = 0;
+// VSQoE starts
+#include <vsqoe_shared_module.h>
+static shared_struct* shared_value = NULL;
+// VSQoE ends
 
 #define LSQUIC_LOGGER_MODULE LSQLM_CUBIC
 #define LSQUIC_LOG_CONN_ID lsquic_conn_log_cid(cubic->cu_conn)
@@ -179,22 +172,6 @@ lsquic_cubic_was_quiet (void *cong_ctl, lsquic_time_t now, uint64_t in_flight)
     cubic->cu_epoch_start = 0;
 }
 
-void *vsqoe_worker_thread(void *arg) {
-    while (1) {
-        // Checks and resets the 'value_updated' flag in an atomic operation
-        if (atomic_exchange(&vsqoe_value_updated, 0)) {
-            int cwnd = atomic_load(&vsqoe_latest_value);
-            char commandBuf[256];
-            snprintf(commandBuf, sizeof(commandBuf), "sudo bpftool map update name CwndMap "
-                     "key hex 00 00 00 00 value hex %02X %02X %02X %02X",
-                     cwnd & 0xFF, (cwnd >> 8) & 0xFF, (cwnd >> 16) & 0xFF, (cwnd >> 24) & 0xFF);
-            system(commandBuf);
-        }
-        usleep(1000); // Sleep briefly to prevent busy-waiting
-    }
-    return NULL;
-}
-
 static void
 lsquic_cubic_ack (void *cong_ctl, struct lsquic_packet_out *packet_out,
                   unsigned n_bytes, lsquic_time_t now_time, int app_limited)
@@ -222,20 +199,15 @@ lsquic_cubic_ack (void *cong_ctl, struct lsquic_packet_out *packet_out,
         LSQ_DEBUG("ACK: cwnd: %lu", cubic->cu_cwnd);
     }
 
-    if (!vsqoe_worker_thread_initiated) {
-        atomic_init(&vsqoe_latest_value, 0);
-        atomic_init(&vsqoe_value_updated, 0);
-
-        pthread_t thread;
-        pthread_create(&thread, NULL, vsqoe_worker_thread, NULL);
-        pthread_detach(thread);
-        vsqoe_worker_thread_initiated = 1;
-    }
-
     LOG_CWND(cubic);
+
+    // VSQoE starts
     LSQ_DEBUG("VSQoE: info: cwnd: %lu", cubic->cu_cwnd);
-    atomic_store(&vsqoe_latest_value, cubic->cu_cwnd);
-    atomic_store(&vsqoe_value_updated, 1);
+    if (shared_value == NULL) {
+        shared_value = shared_value_init("/tmp/shared_cwnd");
+    }
+    shared_value_write(shared_value, cubic->cu_cwnd);
+    // VSQoE ends
 }
 
 
