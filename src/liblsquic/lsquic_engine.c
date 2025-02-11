@@ -385,7 +385,7 @@ lsquic_engine_init_settings (struct lsquic_engine_settings *settings,
     settings->es_mtu_probe_timer = LSQUIC_DF_MTU_PROBE_TIMER;
     settings->es_dplpmtud        = LSQUIC_DF_DPLPMTUD;
     // settings->es_cc_algo         = LSQUIC_DF_CC_ALGO;
-    settings->es_cc_algo         = 1;
+    settings->es_cc_algo         = 2;
     settings->es_cc_rtt_thresh   = LSQUIC_DF_CC_RTT_THRESH;
     settings->es_optimistic_nat  = LSQUIC_DF_OPTIMISTIC_NAT;
     settings->es_ext_http_prio   = LSQUIC_DF_EXT_HTTP_PRIO;
